@@ -153,6 +153,8 @@ class VisualizeProcess:
         p.start()
 
     def visualize(self):
+        frame_counter = 0
+
         # for coloring clusters
         colors = [
             [0, np.random.randint(255), np.random.randint(255)] for _ in range(100)
@@ -245,6 +247,8 @@ class VisualizeProcess:
             cv2.imshow("img_merge", img_merge)
             cv2.imshow("ll_seg_mask", ll_seg_mask)
 
+            frame_counter += 1
+
             k = cv2.waitKey(1)
             if k % 256 == ord("q"):
                 # q pressed
@@ -255,7 +259,7 @@ class VisualizeProcess:
                 # SPACE pressed
                 for points in points_of_interest.tolist():
                     for y, x in points:
-                        print(f"x: {x * 2}, y: {(new_unpad_h - y) * 2}")
+                        print(f"x: {x * scale}, y: {(new_unpad_h - y) * scale}")
                 img_name = f"opencv_frame_{frame_counter}.png"
                 cv2.imwrite(img_name, img_merge)
                 print(f"{img_name} written!")
@@ -300,8 +304,6 @@ if __name__ == "__main__":
             shape=cv2.MORPH_ELLIPSE, ksize=(kernel_size, kernel_size)
         )
 
-    frame_counter = 0
-
     cam.start()
     while True:
         img_bgr = cam.get()
@@ -309,8 +311,6 @@ if __name__ == "__main__":
         if args.flip:
             img_bgr = cv2.flip(img_bgr, 0)
             img_bgr = cv2.flip(img_bgr, 1)
-
-        frame_counter += 1
 
         height, width, _ = img_bgr.shape
 
