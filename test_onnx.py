@@ -9,10 +9,6 @@ from sklearn import cluster
 from threading import Thread, Event
 from queue import Queue
 
-UDP_IP = os.environ["UDP_IP"]
-UDP_PORT = int(os.environ["UDP_PORT"])
-HEADER = "$CAM_LANE"
-
 
 def resize_unscale(img, new_shape=(320, 320), color=114):
     shape = img.shape[:2]  # current shape [height, width]
@@ -91,15 +87,14 @@ parser.add_argument("--debug", action="store_true")
 
 
 class CameraQueue:
-    def __init__(self, src, queue_size=100):
+    def __init__(self, src, size=1000):
         self.cap = cv2.VideoCapture(args.source)
 
         self.event = Event()
         t = Thread(target=self.read, args=(), daemon=True)
         t.start()
 
-        self.q_size = queue_size
-        self.queue = Queue(maxsize=self.q_size)
+        self.queue = Queue(maxsize=size)
 
     def read(self):
         while True:
@@ -125,6 +120,28 @@ class CameraQueue:
         self.cap.release()
 
 
+class SocketQueue:
+    def __init__(self, ip, port, size=1000):
+        self.queue = Queue(maxsize=size)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.ip = ip
+        self.port = port
+
+        t = Thread(target=self.send, args=(), daemon=True)
+        t.start()
+
+    def send(self):
+        HEADER = "$CAM_LANE"
+        while True:
+            tf_poi = self.queue.get()
+            message = [HEADER]
+            for points in tf_poi.tolist():
+                for y, x in points:
+                    message.append(f"{x} {y}")
+            message = ", ".join(message)
+            self.sock.sendto(message.encode(), (self.ip, self.port))
+
+
 if __name__ == "__main__":
     args = parser.parse_args()
 
@@ -135,7 +152,12 @@ if __name__ == "__main__":
 
     cam = CameraQueue(args.source)
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    socket_queue = SocketQueue(
+        ip=os.environ["UDP_IP"],
+        port=int(os.environ["UDP_PORT"]),
+    )
+
+    sock_queue = socket_queue.queue
 
     R_TOP = (480 - 155) / 480
     R_MIDDLE = (480 - 135) / 480
@@ -280,12 +302,7 @@ if __name__ == "__main__":
         tf_poi[:, :, 0] = new_unpad_h - tf_poi[:, :, 0]
 
         # send message
-        message = [HEADER]
-        for points in tf_poi.tolist():
-            for y, x in points:
-                message.append(f"{x} {y}")
-        message = ", ".join(message)
-        sock.sendto(message.encode(), (UDP_IP, UDP_PORT))
+        sock_queue.put(tf_poi)
 
         if args.debug is False:
             continue
