@@ -1,19 +1,23 @@
 import os
+import socket
 import cv2
 import torch
 import argparse
 import onnxruntime as ort
 import numpy as np
+from sklearn import cluster
+
 from lib.core.general import non_max_suppression
 
 
-def resize_unscale(img, new_shape=(640, 640), color=114):
+def resize_unscale(img, new_shape=(320, 320), color=114):
     shape = img.shape[:2]  # current shape [height, width]
     if isinstance(new_shape, int):
         new_shape = (new_shape, new_shape)
 
     canvas = np.zeros((new_shape[0], new_shape[1], 3))
     canvas.fill(color)
+
     # Scale ratio (new / old) new_shape(h,w)
     r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
 
@@ -29,17 +33,27 @@ def resize_unscale(img, new_shape=(640, 640), color=114):
     if shape[::-1] != new_unpad:  # resize
         img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_AREA)
 
-    canvas[dh:dh + new_unpad_h, dw:dw + new_unpad_w, :] = img
+    canvas[dh : dh + new_unpad_h, dw : dw + new_unpad_w, :] = img
 
     return canvas, r, dw, dh, new_unpad_w, new_unpad_h  # (dw,dh)
 
 
-def infer_yolop(weight="yolop-640-640.onnx",
-                img_path="./inference/images/7dd9ef45-f197db95.jpg"):
-
+def load_yolop(onnx_path="yolop-320-320.onnx"):
     ort.set_default_logger_severity(4)
-    onnx_path = f"./weights/{weight}"
-    ort_session = ort.InferenceSession(onnx_path)
+    so = ort.SessionOptions()
+    so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+
+    if ort.get_device() == "GPU":
+        providers = ["CUDAExecutionProvider"]
+    else:
+        providers = ["CPUExecutionProvider"]
+
+    ort_session = ort.InferenceSession(
+        onnx_path,
+        sess_option=so,
+        providers=providers,
+    )
+
     print(f"Load {onnx_path} done!")
 
     outputs_info = ort_session.get_outputs()
@@ -52,121 +66,310 @@ def infer_yolop(weight="yolop-640-640.onnx",
 
     print("num outputs: ", len(outputs_info))
 
-    save_det_path = f"./pictures/detect_onnx.jpg"
-    save_da_path = f"./pictures/da_onnx.jpg"
-    save_ll_path = f"./pictures/ll_onnx.jpg"
-    save_merge_path = f"./pictures/output_onnx.jpg"
+    return ort_session
 
-    img_bgr = cv2.imread(img_path)
-    height, width, _ = img_bgr.shape
 
-    # convert to RGB
-    img_rgb = img_bgr[:, :, ::-1].copy()
+UDP_IP = os.environ["UDP_IP"]
+UDP_PORT = int(os.environ["UDP_PORT"])
+HEADER = "$CAM_LANE"
 
-    # resize & normalize
-    canvas, r, dw, dh, new_unpad_w, new_unpad_h = resize_unscale(img_rgb, (640, 640))
+parser = argparse.ArgumentParser()
+parser.add_argument("--source", default="0")
+parser.add_argument("--flip", action="store_true")
 
-    img = canvas.copy().astype(np.float32)  # (3,640,640) RGB
-    img /= 255.0
-    img[:, :, 0] -= 0.485
-    img[:, :, 1] -= 0.456
-    img[:, :, 2] -= 0.406
-    img[:, :, 0] /= 0.229
-    img[:, :, 1] /= 0.224
-    img[:, :, 2] /= 0.225
+parser.add_argument("--onnx_path", type=str, default=None)
+parser.add_argument("--img_size", type=int, default=320)
 
-    img = img.transpose(2, 0, 1)
+parser.add_argument("--close", action="store_true")
+parser.add_argument("--kernel_size", type=int, default=7)
 
-    img = np.expand_dims(img, 0)  # (1, 3,640,640)
+parser.add_argument("--top", type=float, default=(480 - 155) / 480)
+parser.add_argument("--middle", type=float, default=(480 - 135) / 480)
+parser.add_argument("--bottom", type=float, default=(480 - 115) / 480)
 
-    # inference: (1,n,6) (1,2,640,640) (1,2,640,640)
-    det_out, da_seg_out, ll_seg_out = ort_session.run(
-        ['det_out', 'drive_area_seg', 'lane_line_seg'],
-        input_feed={"images": img}
-    )
-
-    det_out = torch.from_numpy(det_out).float()
-    boxes = non_max_suppression(det_out)[0]  # [n,6] [x1,y1,x2,y2,conf,cls]
-    boxes = boxes.cpu().numpy().astype(np.float32)
-
-    if boxes.shape[0] == 0:
-        print("no bounding boxes detected.")
-        return
-
-    # scale coords to original size.
-    boxes[:, 0] -= dw
-    boxes[:, 1] -= dh
-    boxes[:, 2] -= dw
-    boxes[:, 3] -= dh
-    boxes[:, :4] /= r
-
-    print(f"detect {boxes.shape[0]} bounding boxes.")
-
-    img_det = img_rgb[:, :, ::-1].copy()
-    for i in range(boxes.shape[0]):
-        x1, y1, x2, y2, conf, label = boxes[i]
-        x1, y1, x2, y2, label = int(x1), int(y1), int(x2), int(y2), int(label)
-        img_det = cv2.rectangle(img_det, (x1, y1), (x2, y2), (0, 255, 0), 2, 2)
-
-    cv2.imwrite(save_det_path, img_det)
-
-    # select da & ll segment area.
-    da_seg_out = da_seg_out[:, :, dh:dh + new_unpad_h, dw:dw + new_unpad_w]
-    ll_seg_out = ll_seg_out[:, :, dh:dh + new_unpad_h, dw:dw + new_unpad_w]
-
-    da_seg_mask = np.argmax(da_seg_out, axis=1)[0]  # (?,?) (0|1)
-    ll_seg_mask = np.argmax(ll_seg_out, axis=1)[0]  # (?,?) (0|1)
-    print(da_seg_mask.shape)
-    print(ll_seg_mask.shape)
-
-    color_area = np.zeros((new_unpad_h, new_unpad_w, 3), dtype=np.uint8)
-    color_area[da_seg_mask == 1] = [0, 255, 0]
-    color_area[ll_seg_mask == 1] = [255, 0, 0]
-    color_seg = color_area
-
-    # convert to BGR
-    color_seg = color_seg[..., ::-1]
-    color_mask = np.mean(color_seg, 2)
-    img_merge = canvas[dh:dh + new_unpad_h, dw:dw + new_unpad_w, :]
-    img_merge = img_merge[:, :, ::-1]
-
-    # merge: resize to original size
-    img_merge[color_mask != 0] = \
-        img_merge[color_mask != 0] * 0.5 + color_seg[color_mask != 0] * 0.5
-    img_merge = img_merge.astype(np.uint8)
-    img_merge = cv2.resize(img_merge, (width, height),
-                           interpolation=cv2.INTER_LINEAR)
-    for i in range(boxes.shape[0]):
-        x1, y1, x2, y2, conf, label = boxes[i]
-        x1, y1, x2, y2, label = int(x1), int(y1), int(x2), int(y2), int(label)
-        img_merge = cv2.rectangle(img_merge, (x1, y1), (x2, y2), (0, 255, 0), 2, 2)
-
-    # da: resize to original size
-    da_seg_mask = da_seg_mask * 255
-    da_seg_mask = da_seg_mask.astype(np.uint8)
-    da_seg_mask = cv2.resize(da_seg_mask, (width, height),
-                             interpolation=cv2.INTER_LINEAR)
-
-    # ll: resize to original size
-    ll_seg_mask = ll_seg_mask * 255
-    ll_seg_mask = ll_seg_mask.astype(np.uint8)
-    ll_seg_mask = cv2.resize(ll_seg_mask, (width, height),
-                             interpolation=cv2.INTER_LINEAR)
-
-    cv2.imwrite(save_merge_path, img_merge)
-    cv2.imwrite(save_da_path, da_seg_mask)
-    cv2.imwrite(save_ll_path, ll_seg_mask)
-
-    print("detect done.")
-
+parser.add_argument("--debug", action="store_true")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--weight', type=str, default="yolop-640-640.onnx")
-    parser.add_argument('--img', type=str, default="./inference/images/9aa94005-ff1d4c9a.jpg")
     args = parser.parse_args()
 
-    infer_yolop(weight=args.weight, img_path=args.img)
-    """
-    PYTHONPATH=. python3 ./test_onnx.py --weight yolop-640-640.onnx --img test.jpg
-    """
+    sess_options = ort.SessionOptions()
+
+    if args.source.isnumeric():
+        args.source = int(args.source)
+
+    cap = cv2.VideoCapture(args.source)
+
+    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    print(f"width: {width} height: {height}")
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    R_TOP = (480 - 155) / 480
+    R_MIDDLE = (480 - 135) / 480
+    R_BOTTOM = (480 - 115) / 480
+
+    if args.onnx_path is None:
+        args.onnx_path = f"weights/yolop-{args.img_size}-{args.img_size}.onnx"
+    ort_session = load_yolop(onnx_path=args.onnx_path)
+
+    dbscan = cluster.DBSCAN(eps=3, min_samples=2)
+
+    if args.close:
+        kernel_size = args.kernel_size
+        kernel = cv2.getStructuringElement(
+            shape=cv2.MORPH_ELLIPSE, ksize=(kernel_size, kernel_size)
+        )
+
+    frame_counter = 0
+
+    img_merge = points_of_interest = new_unpad_h = None
+    while True:
+        ret, img_bgr = cap.read()
+
+        if not ret:
+            print("failed to grab img_bgr")
+            break
+
+        if args.flip:
+            img_bgr = cv2.flip(img_bgr, 0)
+            img_bgr = cv2.flip(img_bgr, 1)
+
+        frame_counter += 1
+
+        height, width, _ = img_bgr.shape
+
+        # convert to RGB
+        img_rgb = img_bgr[:, :, ::-1].copy()
+
+        # resize & normalize
+        canvas, r, dw, dh, new_unpad_w, new_unpad_h = resize_unscale(
+            img_rgb, (args.img_size, args.img_size)
+        )
+
+        TOP = int(new_unpad_h * args.top)
+        MIDDLE = int(new_unpad_h * args.middle)
+        BOTTOM = int(new_unpad_h * args.bottom)
+
+        img = canvas.copy().astype(np.float32)  # (3,320,320) RGB
+        img /= 255.0
+        img[:, :, 0] -= 0.485
+        img[:, :, 1] -= 0.456
+        img[:, :, 2] -= 0.406
+        img[:, :, 0] /= 0.229
+        img[:, :, 1] /= 0.224
+        img[:, :, 2] /= 0.225
+
+        img = img.transpose(2, 0, 1)
+
+        img = np.expand_dims(img, 0)  # (1, 3,320,320)
+
+        # inference: (1,n,6) (1,2,320,320) (1,2,320,320)
+        det_out, da_seg_out, ll_seg_out = ort_session.run(
+            ["det_out", "drive_area_seg", "lane_line_seg"],
+            input_feed={"images": img},
+        )
+
+        # select ll segment area.
+        ll_seg_out = ll_seg_out[:, :, dh : dh + new_unpad_h, dw : dw + new_unpad_w]
+
+        (ll_seg_mask,) = np.argmax(ll_seg_out, axis=1)  # (?,?) (0|1)
+
+        if args.close:
+            ll_seg_mask = cv2.morphologyEx(
+                ll_seg_mask.astype(np.uint8), cv2.MORPH_OPEN, kernel, iterations=1
+            )
+
+        masked_ll_seg_mask = ll_seg_mask.copy()
+
+        # remove top portion where lanes can merge
+        masked_ll_seg_mask[:TOP, :] = 0
+        masked_ll_seg_mask[BOTTOM + 1 :, :] = 0
+
+        # get distance from center to lane centers
+        points_of_interest = np.zeros((2, 3, 2)).astype(int)
+        points_of_interest[:, :, 0] = [TOP, MIDDLE, BOTTOM]
+        points_of_interest[:, :, 1].fill(new_unpad_w // 2)
+
+        if np.any(masked_ll_seg_mask == 1):
+            y, x = np.where(ll_seg_mask == 1)
+            lane_coords = np.stack([y, x]).T
+
+            # label coordinates using DBSCAN
+            dbscan.fit(lane_coords)
+
+            lanes = []
+            distances = []
+            found_poi = []
+
+            labels = dbscan.labels_
+            for label in range(labels.max() + 1):
+                # extract coordinates
+                (index,) = np.where(labels == label)
+                lane_y = y[index]
+                lane_x = x[index]
+
+                # average along x axis
+                lane = []
+                for unique_y in np.unique(lane_y):
+                    (y_index,) = np.where(lane_y == unique_y)
+                    mean_x = int(lane_x[y_index].mean())
+                    lane.append(np.array([unique_y, mean_x]))
+                lane = np.stack(lane)  # [y; x]
+                lanes.append(lane)
+
+                # extract points of interest
+                points = np.zeros((3, 2)).astype(int)
+                points[:, 0] = [TOP, MIDDLE, BOTTOM]
+                # points[:, 1].fill(new_unpad_w // 2)
+                for i, target_y in enumerate([TOP, MIDDLE, BOTTOM]):
+                    target_x = np.extract(
+                        lane[:, 0] == target_y,
+                        lane[:, 1],
+                    )
+
+                    if len(target_x):
+                        points[i, 1] = target_x
+
+                found_poi.append(points)
+
+                # distance between center and lane middle point
+                distance = np.abs(points[1, 1] - new_unpad_w / 2)
+                distances.append(distance)
+
+            # reorder lanes
+            index = np.argsort(distances)[:2]
+            for i, j in enumerate(index.tolist()):
+                points_of_interest[i] = found_poi[j]
+
+        # transform coordinates
+        tf_poi = points_of_interest.copy()
+        tf_poi[:, :, 1] = tf_poi[:, :, 1] - new_unpad_w // 2
+        tf_poi[:, :, 0] = new_unpad_h - tf_poi[:, :, 0]
+
+        # send message
+        message = [HEADER]
+        for points in tf_poi.tolist():
+            for y, x in points:
+                message.append(f"{x} {y}")
+        message = ", ".join(message)
+        sock.sendto(message.encode(), (UDP_IP, UDP_PORT))
+
+        if args.debug is False:
+            continue
+
+        model_outputs = (det_out, da_seg_out, ll_seg_mask)
+        resize_outputs = (canvas, r, dw, dh, new_unpad_w, new_unpad_h)
+
+        det_out, da_seg_out, ll_seg_mask = model_outputs
+        canvas, r, dw, dh, new_unpad_w, new_unpad_h = resize_outputs
+        height, width, _ = img_rgb.shape
+
+        det_out = torch.from_numpy(det_out).float()
+        boxes = non_max_suppression(det_out)[0]  # [n,6] [x1,y1,x2,y2,conf,cls]
+        boxes = boxes.cpu().numpy().astype(np.float32)
+
+        # scale coords to original size.
+        boxes[:, 0] -= dw
+        boxes[:, 1] -= dh
+        boxes[:, 2] -= dw
+        boxes[:, 3] -= dh
+        boxes[:, :4] /= r
+
+        img_det = img_rgb[:, :, ::-1].copy()
+        for i in range(boxes.shape[0]):
+            x1, y1, x2, y2, conf, label = boxes[i]
+            x1, y1, x2, y2, label = int(x1), int(y1), int(x2), int(y2), int(label)
+            img_det = cv2.rectangle(img_det, (x1, y1), (x2, y2), (0, 255, 0), 2, 2)
+
+        cv2.imshow("img_det", img_det)
+
+        # select da & ll segment area.
+        da_seg_out = da_seg_out[:, :, dh : dh + new_unpad_h, dw : dw + new_unpad_w]
+        # ll_seg_out = ll_seg_out[:, :, dh : dh + new_unpad_h, dw : dw + new_unpad_w] # already executed
+
+        da_seg_mask = np.argmax(da_seg_out, axis=1)[0]  # (?,?) (0|1)
+
+        color_area = np.zeros((new_unpad_h, new_unpad_w, 3), dtype=np.uint8)
+        color_area[da_seg_mask == 1] = [0, 255, 0]
+        color_area[ll_seg_mask == 1] = [255, 0, 0]
+        color_seg = color_area
+
+        # convert to BGR
+        color_seg = color_seg[..., ::-1]
+        color_mask = np.mean(color_seg, 2)
+        img_merge = canvas[dh : dh + new_unpad_h, dw : dw + new_unpad_w, :]
+        img_merge = img_merge[:, :, ::-1]
+
+        # merge: resize to original size
+        img_merge[color_mask != 0] = (
+            img_merge[color_mask != 0] * 0.5 + color_seg[color_mask != 0] * 0.5
+        )
+        img_merge = img_merge.astype(np.uint8)
+
+        # draw points
+        for points in points_of_interest.tolist():
+            for y, x in points:
+                cv2.circle(img_merge, (x, y), 3, (255, 0, 0), 3)
+
+        color = (0, 0, 255)
+        thickness = 1
+        cv2.line(img_merge, (0, TOP), (new_unpad_w, TOP), color, thickness)
+        cv2.line(img_merge, (0, MIDDLE), (new_unpad_w, MIDDLE), color, thickness)
+        cv2.line(img_merge, (0, BOTTOM), (new_unpad_w, BOTTOM), color, thickness)
+        cv2.line(
+            img_merge,
+            (new_unpad_w // 2, 0),
+            (new_unpad_w // 2, new_unpad_h),
+            color,
+            thickness,
+        )
+
+        img_merge = cv2.resize(
+            img_merge, (width, height), interpolation=cv2.INTER_LINEAR
+        )
+        for i in range(boxes.shape[0]):
+            x1, y1, x2, y2, conf, label = boxes[i]
+            x1, y1, x2, y2, label = int(x1), int(y1), int(x2), int(y2), int(label)
+            img_merge = cv2.rectangle(img_merge, (x1, y1), (x2, y2), (0, 255, 0), 2, 2)
+
+        # da: resize to original size
+        da_seg_mask = da_seg_mask * 255
+        da_seg_mask = da_seg_mask.astype(np.uint8)
+        da_seg_mask = cv2.resize(
+            da_seg_mask, (width, height), interpolation=cv2.INTER_LINEAR
+        )
+
+        # ll: resize to original size
+        ll_seg_mask = ll_seg_mask * 255
+        ll_seg_mask = ll_seg_mask.astype(np.uint8)
+        ll_seg_mask = cv2.resize(
+            ll_seg_mask, (width, height), interpolation=cv2.INTER_LINEAR
+        )
+
+        cv2.imshow("img_merge", img_merge)
+        cv2.imshow("da_seg_mask", da_seg_mask)
+        cv2.imshow("ll_seg_mask", ll_seg_mask)
+
+        cv2.imshow("img_merge", img_merge)
+        cv2.imshow("da_seg_mask", da_seg_mask)
+        cv2.imshow("ll_seg_mask", ll_seg_mask)
+
+        k = cv2.waitKey(1)
+        if k % 256 == ord("q"):
+            # q pressed
+            print("q pressed, closing...")
+            break
+
+        elif k % 256 == 32:
+            # SPACE pressed
+            for points in points_of_interest.tolist():
+                for y, x in points:
+                    print(f"x: {x * 2}, y: {(new_unpad_h - y) * 2}")
+            img_name = f"opencv_frame_{frame_counter}.png"
+            cv2.imwrite(img_name, img_merge)
+            print(f"{img_name} written!")
+
+    cap.release()
+
+    cv2.destroyAllWindows()
