@@ -9,6 +9,8 @@ from sklearn import cluster
 from threading import Thread, Event
 from queue import Queue
 
+import multiprocessing as mp
+
 
 def resize_unscale(img, new_shape=(320, 320), color=114):
     shape = img.shape[:2]  # current shape [height, width]
@@ -142,6 +144,124 @@ class SocketQueue:
             self.sock.sendto(message.encode(), (self.ip, self.port))
 
 
+class VisualizeProcess:
+    def __init__(self, size=1000):
+        self.queue = mp.Queue(maxsize=size)
+
+        p = mp.Process(target=self.visualize, daemon=True)
+        p.start()
+
+    def visualize(self):
+        # for coloring clusters
+        colors = [
+            [0, np.random.randint(255), np.random.randint(255)] for _ in range(100)
+        ]
+
+        while True:
+            (
+                img_rgb,
+                canvas,
+                r,
+                dw,
+                dh,
+                new_unpad_w,
+                new_unpad_h,
+                ll_seg_mask,
+                masked_ll_seg_mask,
+                labels,
+                points_of_interest,
+            ) = self.queue.get()
+
+            height, width, _ = img_rgb.shape
+
+            TOP = int(new_unpad_h * args.top)
+            MIDDLE = int(new_unpad_h * args.middle)
+            BOTTOM = int(new_unpad_h * args.bottom)
+
+            cluster_seg = np.zeros((new_unpad_h, new_unpad_w, 3))
+            cluster_seg[ll_seg_mask == 1] = (255, 0, 0)
+            if np.any(masked_ll_seg_mask == 1):
+                y, x = np.where(masked_ll_seg_mask == 1)
+                for label in labels:
+                    (index,) = np.where(labels == label)
+                    cluster_seg[y[index], x[index]] = colors[label]
+
+            cluster_labels = cluster_seg.astype(np.uint8)
+            cluster_labels = cv2.resize(
+                cluster_labels, (width, height), interpolation=cv2.INTER_LINEAR
+            )
+
+            cv2.imshow("cluster_labels", cluster_labels)
+
+            # convert to BGR
+            cluster_seg = cluster_seg[..., ::-1]
+            cluster_mask = np.mean(cluster_seg, 2)
+            img_merge = canvas[dh : dh + new_unpad_h, dw : dw + new_unpad_w, :]
+            img_merge = img_merge[:, :, ::-1]
+
+            # merge: resize to original size
+            img_merge[cluster_mask != 0] = (
+                img_merge[cluster_mask != 0] * 0.5
+                + cluster_seg[cluster_mask != 0] * 0.5
+            )
+            img_merge = img_merge.astype(np.uint8)
+
+            img_merge = cv2.resize(
+                img_merge, (width, height), interpolation=cv2.INTER_LINEAR
+            )
+
+            scale = width // new_unpad_w
+            # draw points
+            for points in points_of_interest.tolist():
+                for y, x in points:
+                    cv2.circle(
+                        img_merge,
+                        (scale * x, scale * y),
+                        5,
+                        (255, 0, 0),
+                        5,
+                    )
+
+            # draw lines
+            for y in [TOP, MIDDLE, BOTTOM]:
+                cv2.line(img_merge, (0, scale * y), (width, scale * y), (0, 0, 255), 2)
+
+            cv2.line(
+                img_merge,
+                (width // 2, 0),
+                (width // 2, height),
+                (0, 0, 255),
+                2,
+            )
+
+            # ll: resize to original size
+            ll_seg_mask = ll_seg_mask * 255
+            ll_seg_mask = ll_seg_mask.astype(np.uint8)
+            ll_seg_mask = cv2.resize(
+                ll_seg_mask, (width, height), interpolation=cv2.INTER_LINEAR
+            )
+
+            cv2.imshow("img_merge", img_merge)
+            cv2.imshow("ll_seg_mask", ll_seg_mask)
+
+            k = cv2.waitKey(1)
+            if k % 256 == ord("q"):
+                # q pressed
+                print("q pressed, closing...")
+                break
+
+            elif k % 256 == 32:
+                # SPACE pressed
+                for points in points_of_interest.tolist():
+                    for y, x in points:
+                        print(f"x: {x * 2}, y: {(new_unpad_h - y) * 2}")
+                img_name = f"opencv_frame_{frame_counter}.png"
+                cv2.imwrite(img_name, img_merge)
+                print(f"{img_name} written!")
+
+        cv2.destroyAllWindows()
+
+
 if __name__ == "__main__":
     args = parser.parse_args()
 
@@ -159,6 +279,10 @@ if __name__ == "__main__":
 
     sock_queue = socket_queue.queue
 
+    if args.debug:
+        vis_process = VisualizeProcess()
+        vis_queue = vis_process.queue
+
     R_TOP = (480 - 155) / 480
     R_MIDDLE = (480 - 135) / 480
     R_BOTTOM = (480 - 115) / 480
@@ -174,9 +298,6 @@ if __name__ == "__main__":
         kernel = cv2.getStructuringElement(
             shape=cv2.MORPH_ELLIPSE, ksize=(kernel_size, kernel_size)
         )
-
-    # for coloring clusters
-    colors = [[0, np.random.randint(255), np.random.randint(255)] for _ in range(100)]
 
     frame_counter = 0
 
@@ -304,90 +425,21 @@ if __name__ == "__main__":
         # send message
         sock_queue.put(tf_poi)
 
-        if args.debug is False:
-            continue
-
-        height, width, _ = img_rgb.shape
-
-        cluster_seg = np.zeros((new_unpad_h, new_unpad_w, 3))
-        cluster_seg[ll_seg_mask == 1] = (255, 0, 0)
-        if np.any(masked_ll_seg_mask == 1):
-            y, x = np.where(masked_ll_seg_mask == 1)
-            for label in labels:
-                (index,) = np.where(labels == label)
-                cluster_seg[y[index], x[index]] = colors[label]
-
-        cluster_labels = cluster_seg.astype(np.uint8)
-        cluster_labels = cv2.resize(
-            cluster_labels, (width, height), interpolation=cv2.INTER_LINEAR
-        )
-
-        cv2.imshow("cluster_labels", cluster_labels)
-
-        # convert to BGR
-        cluster_seg = cluster_seg[..., ::-1]
-        cluster_mask = np.mean(cluster_seg, 2)
-        img_merge = canvas[dh : dh + new_unpad_h, dw : dw + new_unpad_w, :]
-        img_merge = img_merge[:, :, ::-1]
-
-        # merge: resize to original size
-        img_merge[cluster_mask != 0] = (
-            img_merge[cluster_mask != 0] * 0.5 + cluster_seg[cluster_mask != 0] * 0.5
-        )
-        img_merge = img_merge.astype(np.uint8)
-
-        img_merge = cv2.resize(
-            img_merge, (width, height), interpolation=cv2.INTER_LINEAR
-        )
-
-        scale = width // new_unpad_w
-        # draw points
-        for points in points_of_interest.tolist():
-            for y, x in points:
-                cv2.circle(
-                    img_merge,
-                    (scale * x, scale * y),
-                    5,
-                    (255, 0, 0),
-                    5,
+        if args.debug:
+            vis_queue.put(
+                (
+                    img_rgb,
+                    canvas,
+                    r,
+                    dw,
+                    dh,
+                    new_unpad_w,
+                    new_unpad_h,
+                    ll_seg_mask,
+                    masked_ll_seg_mask,
+                    labels,
+                    points_of_interest,
                 )
-
-        # draw lines
-        for y in [TOP, MIDDLE, BOTTOM]:
-            cv2.line(img_merge, (0, scale * y), (width, scale * y), (0, 0, 255), 2)
-
-        cv2.line(
-            img_merge,
-            (width // 2, 0),
-            (width // 2, height),
-            (0, 0, 255),
-            2,
-        )
-
-        # ll: resize to original size
-        ll_seg_mask = ll_seg_mask * 255
-        ll_seg_mask = ll_seg_mask.astype(np.uint8)
-        ll_seg_mask = cv2.resize(
-            ll_seg_mask, (width, height), interpolation=cv2.INTER_LINEAR
-        )
-
-        cv2.imshow("img_merge", img_merge)
-        cv2.imshow("ll_seg_mask", ll_seg_mask)
-
-        k = cv2.waitKey(1)
-        if k % 256 == ord("q"):
-            # q pressed
-            print("q pressed, closing...")
-            break
-
-        elif k % 256 == 32:
-            # SPACE pressed
-            for points in points_of_interest.tolist():
-                for y, x in points:
-                    print(f"x: {x * 2}, y: {(new_unpad_h - y) * 2}")
-            img_name = f"opencv_frame_{frame_counter}.png"
-            cv2.imwrite(img_name, img_merge)
-            print(f"{img_name} written!")
+            )
 
     cam.release()
-    cv2.destroyAllWindows()
