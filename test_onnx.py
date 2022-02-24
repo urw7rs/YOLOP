@@ -125,7 +125,6 @@ class CameraQueue:
 class SocketQueue:
     def __init__(self, ip, port, size=1000):
         self.queue = Queue(maxsize=size)
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.ip = ip
         self.port = port
 
@@ -133,6 +132,8 @@ class SocketQueue:
         t.start()
 
     def send(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
         HEADER = "$CAM_LANE"
         while True:
             tf_poi = self.queue.get()
@@ -141,7 +142,7 @@ class SocketQueue:
                 for y, x in points:
                     message.append(f"{x} {y}")
             message = ", ".join(message)
-            self.sock.sendto(message.encode(), (self.ip, self.port))
+            sock.sendto(message.encode(), (self.ip, self.port))
 
 
 class VisualizeProcess:
