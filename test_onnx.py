@@ -113,7 +113,7 @@ if __name__ == "__main__":
         args.onnx_path = f"weights/yolop-{args.img_size}-{args.img_size}.onnx"
     ort_session = load_yolop(onnx_path=args.onnx_path)
 
-    dbscan = cluster.DBSCAN(eps=3, min_samples=2)
+    dbscan = cluster.DBSCAN(eps=1, min_samples=5, n_jobs=-1)
 
     if args.close:
         kernel_size = args.kernel_size
@@ -121,9 +121,11 @@ if __name__ == "__main__":
             shape=cv2.MORPH_ELLIPSE, ksize=(kernel_size, kernel_size)
         )
 
+    # for coloring clusters
+    colors = [[0, np.random.randint(255), np.random.randint(255)] for _ in range(100)]
+
     frame_counter = 0
 
-    img_merge = points_of_interest = new_unpad_h = None
     while True:
         ret, img_bgr = cap.read()
 
@@ -192,7 +194,7 @@ if __name__ == "__main__":
         points_of_interest[:, :, 1].fill(new_unpad_w // 2)
 
         if np.any(masked_ll_seg_mask == 1):
-            y, x = np.where(ll_seg_mask == 1)
+            y, x = np.where(masked_ll_seg_mask == 1)
             lane_coords = np.stack([y, x]).T
 
             # label coordinates using DBSCAN
@@ -203,6 +205,7 @@ if __name__ == "__main__":
             found_poi = []
 
             labels = dbscan.labels_
+            # exclude outlier with label -1
             for label in range(labels.max() + 1):
                 # extract coordinates
                 (index,) = np.where(labels == label)
@@ -288,29 +291,34 @@ if __name__ == "__main__":
         da_seg_out = da_seg_out[:, :, dh : dh + new_unpad_h, dw : dw + new_unpad_w]
         # ll_seg_out = ll_seg_out[:, :, dh : dh + new_unpad_h, dw : dw + new_unpad_w] # already executed
 
+        cluster_seg = np.zeros((new_unpad_h, new_unpad_w, 3))
+        cluster_seg[ll_seg_mask == 1] = (255, 0, 0)
+        if np.any(masked_ll_seg_mask == 1):
+            y, x = np.where(masked_ll_seg_mask == 1)
+            for label in labels:
+                (index,) = np.where(labels == label)
+                cluster_seg[y[index], x[index]] = colors[label]
+
+        cluster_labels = cluster_seg.astype(np.uint8)
+        cluster_labels = cv2.resize(
+            cluster_labels, (width, height), interpolation=cv2.INTER_LINEAR
+        )
+
+        cv2.imshow("cluster_labels", cluster_labels)
+
         da_seg_mask = np.argmax(da_seg_out, axis=1)[0]  # (?,?) (0|1)
 
-        color_area = np.zeros((new_unpad_h, new_unpad_w, 3), dtype=np.uint8)
-        color_area[da_seg_mask == 1] = [0, 255, 0]
-        color_area[ll_seg_mask == 1] = [255, 0, 0]
-        color_seg = color_area
-
         # convert to BGR
-        color_seg = color_seg[..., ::-1]
-        color_mask = np.mean(color_seg, 2)
+        cluster_seg = cluster_seg[..., ::-1]
+        cluster_mask = np.mean(cluster_seg, 2)
         img_merge = canvas[dh : dh + new_unpad_h, dw : dw + new_unpad_w, :]
         img_merge = img_merge[:, :, ::-1]
 
         # merge: resize to original size
-        img_merge[color_mask != 0] = (
-            img_merge[color_mask != 0] * 0.5 + color_seg[color_mask != 0] * 0.5
+        img_merge[cluster_mask != 0] = (
+            img_merge[cluster_mask != 0] * 0.5 + cluster_seg[cluster_mask != 0] * 0.5
         )
         img_merge = img_merge.astype(np.uint8)
-
-        # draw points
-        for points in points_of_interest.tolist():
-            for y, x in points:
-                cv2.circle(img_merge, (x, y), 3, (255, 0, 0), 3)
 
         color = (0, 0, 255)
         thickness = 1
@@ -333,6 +341,11 @@ if __name__ == "__main__":
             x1, y1, x2, y2, label = int(x1), int(y1), int(x2), int(y2), int(label)
             img_merge = cv2.rectangle(img_merge, (x1, y1), (x2, y2), (0, 255, 0), 2, 2)
 
+        # draw points
+        for points in points_of_interest.tolist():
+            for y, x in points:
+                cv2.circle(img_merge, (2 * x, 2 * y), 5, (255, 0, 0), 5)
+
         # da: resize to original size
         da_seg_mask = da_seg_mask * 255
         da_seg_mask = da_seg_mask.astype(np.uint8)
@@ -346,10 +359,6 @@ if __name__ == "__main__":
         ll_seg_mask = cv2.resize(
             ll_seg_mask, (width, height), interpolation=cv2.INTER_LINEAR
         )
-
-        cv2.imshow("img_merge", img_merge)
-        cv2.imshow("da_seg_mask", da_seg_mask)
-        cv2.imshow("ll_seg_mask", ll_seg_mask)
 
         cv2.imshow("img_merge", img_merge)
         cv2.imshow("da_seg_mask", da_seg_mask)
