@@ -10,6 +10,7 @@ from threading import Thread, Event
 from queue import Queue
 
 import multiprocessing as mp
+from concurrent.futures import ThreadPoolExecutor
 
 
 def resize_unscale(img, new_shape=(320, 320), color=114):
@@ -304,6 +305,8 @@ if __name__ == "__main__":
             shape=cv2.MORPH_ELLIPSE, ksize=(kernel_size, kernel_size)
         )
 
+    executor = ThreadPoolExecutor(max_workers=16)
+
     cam.start()
     while True:
         img_bgr = cam.get()
@@ -373,13 +376,9 @@ if __name__ == "__main__":
             # label coordinates using DBSCAN
             dbscan.fit(lane_coords)
 
-            lanes = []
-            distances = []
-            found_poi = []
-
             labels = dbscan.labels_
-            # exclude outlier with label -1
-            for label in range(labels.max() + 1):
+
+            def get_poi(label):
                 # extract coordinates
                 (index,) = np.where(labels == label)
                 lane_y = y[index]
@@ -392,7 +391,6 @@ if __name__ == "__main__":
                     mean_x = int(lane_x[y_index].mean())
                     lane.append(np.array([unique_y, mean_x]))
                 lane = np.stack(lane)  # [y; x]
-                lanes.append(lane)
 
                 # extract points of interest
                 points = np.zeros((3, 2)).astype(int)
@@ -407,16 +405,20 @@ if __name__ == "__main__":
                     if len(target_x):
                         points[i, 1] = target_x
 
-                found_poi.append(points)
+                return points
+
+            # exclude outlier with label -1
+            found_poi = list(executor.map(get_poi, range(labels.max() + 1)))
+            if len(found_poi):
+                found_poi = np.stack(found_poi)
 
                 # distance between center and lane middle point
-                distance = np.abs(points[1, 1] - new_unpad_w / 2)
-                distances.append(distance)
+                distances = np.abs(found_poi[:, 1, 1] - new_unpad_w / 2)
 
-            # reorder lanes
-            index = np.argsort(distances)[:2]
-            for i, j in enumerate(index.tolist()):
-                points_of_interest[i] = found_poi[j]
+                # reorder lanes
+                index = np.argsort(distances)[:2]
+                for i, j in enumerate(index.tolist()):
+                    points_of_interest[i] = found_poi[j]
 
         # transform coordinates
         tf_poi = points_of_interest.copy()
