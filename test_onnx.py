@@ -102,10 +102,6 @@ if __name__ == "__main__":
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-    R_TOP = (480 - 155) / 480
-    R_MIDDLE = (480 - 135) / 480
-    R_BOTTOM = (480 - 115) / 480
-
     if args.onnx_path is None:
         args.onnx_path = f"weights/yolop-{args.img_size}-{args.img_size}.onnx"
     ort_session = load_yolop(onnx_path=args.onnx_path)
