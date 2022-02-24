@@ -6,6 +6,9 @@ import onnxruntime as ort
 import numpy as np
 from sklearn import cluster
 
+from threading import Thread, Event
+from queue import Queue
+
 UDP_IP = os.environ["UDP_IP"]
 UDP_PORT = int(os.environ["UDP_PORT"])
 HEADER = "$CAM_LANE"
@@ -86,6 +89,42 @@ parser.add_argument("--bottom", type=float, default=(480 - 115) / 480)
 
 parser.add_argument("--debug", action="store_true")
 
+
+class CameraQueue:
+    def __init__(self, src, queue_size=100):
+        self.cap = cv2.VideoCapture(args.source)
+
+        self.event = Event()
+        t = Thread(target=self.read, args=(), daemon=True)
+        t.start()
+
+        self.q_size = queue_size
+        self.queue = Queue(maxsize=self.q_size)
+
+    def read(self):
+        while True:
+            # block until event is set
+            self.event.wait()
+            ret, frame = self.cap.read()
+
+            if not ret:
+                break
+
+            self.queue.put(frame)
+
+    def get(self, *args, **kwargs):
+        return self.queue.get(*args, **kwargs)
+
+    def stop(self):
+        self.event.clear()
+
+    def start(self):
+        self.event.set()
+
+    def release(self):
+        self.cap.release()
+
+
 if __name__ == "__main__":
     args = parser.parse_args()
 
@@ -94,11 +133,7 @@ if __name__ == "__main__":
     if args.source.isnumeric():
         args.source = int(args.source)
 
-    cap = cv2.VideoCapture(args.source)
-
-    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    print(f"width: {width} height: {height}")
+    cam = CameraQueue(args.source)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -123,12 +158,9 @@ if __name__ == "__main__":
 
     frame_counter = 0
 
+    cam.start()
     while True:
-        ret, img_bgr = cap.read()
-
-        if not ret:
-            print("failed to grab img_bgr")
-            break
+        img_bgr = cam.get()
 
         if args.flip:
             img_bgr = cv2.flip(img_bgr, 0)
@@ -340,6 +372,5 @@ if __name__ == "__main__":
             cv2.imwrite(img_name, img_merge)
             print(f"{img_name} written!")
 
-    cap.release()
-
+    cam.release()
     cv2.destroyAllWindows()
