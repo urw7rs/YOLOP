@@ -1,13 +1,14 @@
 import os
 import socket
 import cv2
-import torch
 import argparse
 import onnxruntime as ort
 import numpy as np
 from sklearn import cluster
 
-from lib.core.general import non_max_suppression
+UDP_IP = os.environ["UDP_IP"]
+UDP_PORT = int(os.environ["UDP_PORT"])
+HEADER = "$CAM_LANE"
 
 
 def resize_unscale(img, new_shape=(320, 320), color=114):
@@ -68,10 +69,6 @@ def load_yolop(onnx_path="yolop-320-320.onnx"):
 
     return ort_session
 
-
-UDP_IP = os.environ["UDP_IP"]
-UDP_PORT = int(os.environ["UDP_PORT"])
-HEADER = "$CAM_LANE"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--source", default="0")
@@ -261,35 +258,7 @@ if __name__ == "__main__":
         if args.debug is False:
             continue
 
-        model_outputs = (det_out, da_seg_out, ll_seg_mask)
-        resize_outputs = (canvas, r, dw, dh, new_unpad_w, new_unpad_h)
-
-        det_out, da_seg_out, ll_seg_mask = model_outputs
-        canvas, r, dw, dh, new_unpad_w, new_unpad_h = resize_outputs
         height, width, _ = img_rgb.shape
-
-        det_out = torch.from_numpy(det_out).float()
-        boxes = non_max_suppression(det_out)[0]  # [n,6] [x1,y1,x2,y2,conf,cls]
-        boxes = boxes.cpu().numpy().astype(np.float32)
-
-        # scale coords to original size.
-        boxes[:, 0] -= dw
-        boxes[:, 1] -= dh
-        boxes[:, 2] -= dw
-        boxes[:, 3] -= dh
-        boxes[:, :4] /= r
-
-        img_det = img_rgb[:, :, ::-1].copy()
-        for i in range(boxes.shape[0]):
-            x1, y1, x2, y2, conf, label = boxes[i]
-            x1, y1, x2, y2, label = int(x1), int(y1), int(x2), int(y2), int(label)
-            img_det = cv2.rectangle(img_det, (x1, y1), (x2, y2), (0, 255, 0), 2, 2)
-
-        cv2.imshow("img_det", img_det)
-
-        # select da & ll segment area.
-        da_seg_out = da_seg_out[:, :, dh : dh + new_unpad_h, dw : dw + new_unpad_w]
-        # ll_seg_out = ll_seg_out[:, :, dh : dh + new_unpad_h, dw : dw + new_unpad_w] # already executed
 
         cluster_seg = np.zeros((new_unpad_h, new_unpad_w, 3))
         cluster_seg[ll_seg_mask == 1] = (255, 0, 0)
@@ -305,8 +274,6 @@ if __name__ == "__main__":
         )
 
         cv2.imshow("cluster_labels", cluster_labels)
-
-        da_seg_mask = np.argmax(da_seg_out, axis=1)[0]  # (?,?) (0|1)
 
         # convert to BGR
         cluster_seg = cluster_seg[..., ::-1]
@@ -336,22 +303,11 @@ if __name__ == "__main__":
         img_merge = cv2.resize(
             img_merge, (width, height), interpolation=cv2.INTER_LINEAR
         )
-        for i in range(boxes.shape[0]):
-            x1, y1, x2, y2, conf, label = boxes[i]
-            x1, y1, x2, y2, label = int(x1), int(y1), int(x2), int(y2), int(label)
-            img_merge = cv2.rectangle(img_merge, (x1, y1), (x2, y2), (0, 255, 0), 2, 2)
 
         # draw points
         for points in points_of_interest.tolist():
             for y, x in points:
                 cv2.circle(img_merge, (2 * x, 2 * y), 5, (255, 0, 0), 5)
-
-        # da: resize to original size
-        da_seg_mask = da_seg_mask * 255
-        da_seg_mask = da_seg_mask.astype(np.uint8)
-        da_seg_mask = cv2.resize(
-            da_seg_mask, (width, height), interpolation=cv2.INTER_LINEAR
-        )
 
         # ll: resize to original size
         ll_seg_mask = ll_seg_mask * 255
@@ -361,7 +317,6 @@ if __name__ == "__main__":
         )
 
         cv2.imshow("img_merge", img_merge)
-        cv2.imshow("da_seg_mask", da_seg_mask)
         cv2.imshow("ll_seg_mask", ll_seg_mask)
 
         k = cv2.waitKey(1)
