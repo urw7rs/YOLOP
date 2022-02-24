@@ -346,7 +346,7 @@ Eprint = {arXiv:2108.11250},
 
 ### install via miniconda
 
-create conda env `conda create -n conda python=3.8 cudatoolkit=11.3 cudnn`
+create conda env `conda create -n yolop python=3.8 cudatoolkit=11.3 cudnn`
 
 install dependencies `pip install numpy opencv-python onnxruntime-gpu scikit-learn`
 
