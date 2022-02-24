@@ -340,3 +340,25 @@ Eprint = {arXiv:2108.11250},
 }
 ```
 
+# Extract lane centers using YOLOP
+
+## installation
+
+### install via miniconda
+
+create conda env `conda create -n conda python=3.8 cudatoolkit=11.3 cudnn`
+
+install dependencies `pip install numpy opencv-python onnxruntime-gpu scikit-learn`
+
+### or use docker
+
+build container `docker build -t yolop .`
+
+start container
+```
+docker run --rm --gpus all -v $(pwd):/src \
+                          --device=/dev/video0:/dev/video0 \
+                          -v /tmp/.X11-unix:/tmp/.X11-unix \
+                          -e DISPLAY=$DISPLAY \
+                          -it yolop bash
+```
