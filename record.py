@@ -3,6 +3,8 @@ import cv2
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--source", default="0")
+parser.add_argument("--output_path", default="output.mp4")
+parser.add_argument("--flip", action="store_true")
 
 if __name__ == "__main__":
     args = parser.parse_args()
@@ -14,12 +16,16 @@ if __name__ == "__main__":
 
     # Define the codec and create VideoWriter object
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter("output.mp4", fourcc, 60.0, (640, 480))
+    out = cv2.VideoWriter(args.output_path, fourcc, 30.0, (640, 480))
 
     while cap.isOpened():
         ret, frame = cap.read()
         if ret:
             # frame = cv2.flip(frame, 0)
+
+            if args.flip:
+                frame = cv2.flip(frame, 0)
+                frame = cv2.flip(frame, 1)
 
             # write the flipped frame
             out.write(frame)
