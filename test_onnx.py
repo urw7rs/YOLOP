@@ -287,27 +287,33 @@ if __name__ == "__main__":
         )
         img_merge = img_merge.astype(np.uint8)
 
-        color = (0, 0, 255)
-        thickness = 1
-        cv2.line(img_merge, (0, TOP), (new_unpad_w, TOP), color, thickness)
-        cv2.line(img_merge, (0, MIDDLE), (new_unpad_w, MIDDLE), color, thickness)
-        cv2.line(img_merge, (0, BOTTOM), (new_unpad_w, BOTTOM), color, thickness)
-        cv2.line(
-            img_merge,
-            (new_unpad_w // 2, 0),
-            (new_unpad_w // 2, new_unpad_h),
-            color,
-            thickness,
-        )
-
         img_merge = cv2.resize(
             img_merge, (width, height), interpolation=cv2.INTER_LINEAR
         )
 
+        scale = width // new_unpad_w
         # draw points
         for points in points_of_interest.tolist():
             for y, x in points:
-                cv2.circle(img_merge, (2 * x, 2 * y), 5, (255, 0, 0), 5)
+                cv2.circle(
+                    img_merge,
+                    (scale * x, scale * y),
+                    5,
+                    (255, 0, 0),
+                    5,
+                )
+
+        # draw lines
+        for y in [TOP, MIDDLE, BOTTOM]:
+            cv2.line(img_merge, (0, scale * y), (width, scale * y), (0, 0, 255), 2)
+
+        cv2.line(
+            img_merge,
+            (width // 2, 0),
+            (width // 2, height),
+            (0, 0, 255),
+            2,
+        )
 
         # ll: resize to original size
         ll_seg_mask = ll_seg_mask * 255
