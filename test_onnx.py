@@ -142,7 +142,7 @@ class SocketQueue:
             for points in tf_poi.tolist():
                 for y, x in points:
                     message.append(f"{x} {y}")
-            message = ", ".join(message)
+            message = ", ".join(message) + ","
             sock.sendto(message.encode(), (self.ip, self.port))
 
 
@@ -420,6 +420,7 @@ if __name__ == "__main__":
         tf_poi = points_of_interest.copy()
         tf_poi[:, :, 1] = tf_poi[:, :, 1] - new_unpad_w // 2
         tf_poi[:, :, 0] = new_unpad_h - tf_poi[:, :, 0]
+        tf_poi[:, :, :] *= height // new_unpad_h
 
         # send message
         sock_queue.put(tf_poi)
