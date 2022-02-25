@@ -415,6 +415,8 @@ if __name__ == "__main__":
                 index = np.argsort(distances)[:2]
                 for i, j in enumerate(index.tolist()):
                     points_of_interest[i] = found_poi[j]
+        else:
+            labels = None
 
         # transform coordinates
         tf_poi = points_of_interest.copy()
